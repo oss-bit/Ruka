@@ -1,0 +1,3 @@
+import libRuka
+
+libRuka.main()
