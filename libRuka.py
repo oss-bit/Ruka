@@ -51,8 +51,16 @@ argsp.add_argument("-w",
                    dest="write",
                    action="store_true",
                    help="Actually write the object inot the database")
-argsp.add_argment("path",
+argsp.add_argument("path",
                   help="REad oject from <file>")
+
+argsp = argsubparsers.add_parser("log", help="Display history of a given commit.")
+
+argsp.add_argument("commit", 
+                   defualt="HEAD",
+                   nargs="?",
+                   help="commit to start at.")
+
 
 
 def main(argv=sys.argv[1:]):
@@ -80,7 +88,7 @@ def main(argv=sys.argv[1:]):
 def cmd_init(args):
     repo_create(args.path)
 
-def cmd_cata_file(args):
+def cmd_cat_file(args):
     repo = repo_find()
     cat_file(repo, args.object, fmt=args.type.encode())
 
@@ -101,6 +109,46 @@ def cmd_hash_object(args):
         sha = object_hash(fd, args.type.encode(), repo)
         print(sha)
     
+
+def cmd_log(args):
+    repo = repo_find()
+    print("digraph Rukalog{")
+    print("  node[shape=rect]")
+    log_graphviz(repo, object_find(repo, args.commit), set())
+    print("}")
+
+def log_graphviz(repo, sha, seen):
+    if sha in seen:
+        return
+    
+    seen.add(sha)
+    commit = object_read(repo, sha)
+    short_hash = sha[0:8]
+    message = commit.kvlm[None].decode("utf8").strip()
+    message = message.replace("\\", "\\\\")
+    message = message.replace("\"", "\\\"")
+
+    if "\n" in message:
+        message = message[:message.index("\n")]
+    
+    print("  c_{0} [lable=\"{1}: {2}\]".format(sha, sha[0:7], message))
+    assert commit.fmt == b'commit'
+
+    if not b'parent' in commit.kvlm.keys():
+        return
+
+    parents = commit.kvm[b'parent']
+
+    if type(parents) != list:
+        parents = [ parents ]
+    
+    for p in parents:
+        p = p.decode("ascii")
+        print("   c_{0} -> c_{1}".format(sha, p))
+        log_graphviz(repo, p, seen)
+
+
+
 def object_hash(fd, fmt, repo=None):
     """Hash obhect, writing iti to repo if provided."""
 
@@ -230,7 +278,7 @@ def repo_find(path=".", required=True):
         """
     path =  os.path.realpath(path)
     
-    if os.path.isdir(os.pah.join(path, ".git")):
+    if os.path.isdir(os.path.join(path, ".git")):
         return GitRepository(path)
     
     parent = os.path.realpath(os.path.join(path, ".."))
@@ -342,7 +390,7 @@ def kvlm_parse(raw, start=0, dct=None):
         end = raw.find(b'\n', end+1)
         if raw[end+1] != ord(' '): break
     
-    value = raw[spc+1:end].replace(b'\n', b'\n')
+    value = raw[spc+1:end].replace(b'\n ', b'\n')
 
     if key in dct:
         if type(dct[key]) == list:
@@ -354,3 +402,88 @@ def kvlm_parse(raw, start=0, dct=None):
     
     return kvlm_parse(raw, start=end+1, dct=dct)
 
+def kvlm_serialize(kvlm):
+    ret = b''
+
+    for k in kvlm.kes():
+        if k == None: continue
+        val = kvlm[k]
+        if type(val) != list:
+            val = [val]
+        
+        for v in val:
+            ret += k + b' ' + (v.replace(b'\n',b'\n ')) + b'\n'
+
+    ret += b'\n' + kvlm[None] + b'\n'
+    
+    return ret
+
+class GitCommit(GitObject):
+    fmt = b'commit'
+    
+    def deserialize(self, data):
+        self.kvlm =kvlm_parse(data)
+    
+    def serialize(self):
+        return kvlm_serialize(self.kvlm)
+    
+    def init(self):
+        self.kvlm = dict()
+
+class GitTreeLeaf(object):
+    def __init__(self, mode, path, sha):
+        self.mode = mode
+        self.path = path
+        self.sha = sha
+
+def tree_parse_one(raw, start=0):
+    x = raw.find(b' ', start)
+    assert x-start == 5 or x - start == 6
+
+    mode = raw[start:x]
+    if len(mode) == 5:
+        mode = b" " + mode
+
+    y = raw.find(b'\x00', x)
+    path = raw[x+1:y]
+    sha = format(int.form_bytes(raw[y+1:y+21], "big"), "040x")
+    return y+21, GitTreeLeaf(mode, path.decode("utf-8"), sha)
+
+def tree_parse(raw):
+    pos = 0
+    max = len(raw)
+    ret = list()
+    while pos < max:
+        pos, data = tree_parse_one(raw, pos)
+        re.append(data)
+    return ret
+
+def tree_leaf_sort_key(leaf):
+    if leaf.mode.startswith(b"10"):
+        return leaf.path
+    else:
+        return leaf.path + "/"
+
+def tree_serialize(obj):
+    obj.items.sort(key=tree_leaf_sort_key)
+    ret = b''
+    for i in obj.items:
+        ret += i.mode
+        ret += b' '
+        ret += i.path.encode("utf8")
+        ret += b'/x00'
+        sha = int(i.sha, 16)
+        ret += sha.to_bytes(20, byteorder="big")
+    return ret
+
+class GitTree(GitObject):
+    fmt=b'tree'
+
+    def deserialize(self, data):
+        self.items = tree_parse(data)
+    
+    def serialize(self):
+        return tree_serialize(self)
+    
+    def init(self):
+        self.items = list()
