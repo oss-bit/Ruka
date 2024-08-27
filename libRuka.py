@@ -57,9 +57,24 @@ argsp.add_argument("path",
 argsp = argsubparsers.add_parser("log", help="Display history of a given commit.")
 
 argsp.add_argument("commit", 
-                   defualt="HEAD",
+                   default="HEAD",
                    nargs="?",
                    help="commit to start at.")
+
+argsp = argsubparsers.add_parser("ls-tree", help="Pretty-print a tree object.")
+
+argsp.add_argument("-r",
+                   dest="recursive",
+                   action="store_true",
+                   help="Recurse into sub-trees")
+
+argsp.add_argument("tree", help="A tree-ish object")
+
+argsp = argsubparsers.add_parser("checkout", help="Checkout a commit inside of a directory.")
+
+argsp.add_argument("commit", help="The commit or tree to checkout")
+
+argsp.add_argument("path", help="The EMPTY directory to checkout on.")
 
 
 
@@ -162,6 +177,63 @@ def object_hash(fd, fmt, repo=None):
         case _ : raise Exception ("unknown type %s!" % fmt)
     return object_write(obj, repo)
 
+def cmd_ls_tree(args):
+    repo=repo_find()
+    ls_tree(repo, args.tree, args.recursive)
+
+def ls_tree(repo, ref, recursive=None, prefix=""):
+    sha = object_find(repo, ref, fmt=b'tree')
+    obj = object_read(repo, sha)
+    for item in obj.items:
+        if len(item.mode) == 5:
+            type = item.mode[0:1]
+        else:
+            type = item.mode[0:2]
+        
+        match type:
+            case b'04': type = "tree"
+            case b'10': type = "blob" # A regular file 
+            case b'12': type = "blob" # A symlink. Blob contents is link target
+            case b'16': type = "commit"
+            case _: raise Exception("Wierd tree leaf mode {}".format(item.mode))
+        if not (recursive and type=="tree"):
+            print("{0} {1} {2}\t{3}".format("0"*(6 - len(item.mode)) + item.mode.decode("ascii"),
+                                            type,
+                                            item.sha,
+                                            os.path.join(prefix, item.path)))
+        else:
+            ls_tree(repo, item.sha, recursive, os.path.join(prefix, item.path))
+
+
+def cmd_checkout(args):
+    repo = repo_find()
+    obj = object_read(repo, object_find(repo, args.commit))
+
+    #grab the objects tree object if its a commit
+    if obj.fmt == b'commit':
+        obj = object_read(repo, obj.kvlm[b'tree'].decode("ascii"))
+    
+    #verify that path is an empy directory
+    if os.path.exists(args.path):
+        if not os.path.isdir(args.path):
+            raise Exception("Not a directory {0}!".format(args.path))
+        if os.listdir(args.path):
+            raise Exception("Not empty {0}!".format(args.path))
+    else:
+        os.makedirs(args.path)
+    tree_checkout(repo, obj, os.path.realpath(args.path))
+
+def tree_checkout(repo, tree, path):
+    for item in tree.items:
+        obj = object_read(repo, item.sha)
+        dest = os.path.join(path, item.path)
+
+        if obj.fmt == b'tree':
+            os.mkdir(dest)
+            tree_checkout(repo, obj, dest)
+        elif obj.fmt == b'blob':
+            with open(dest, 'wb') as f:
+                f.write(obj.blobdata)
 
 
 class GitRepository (object):
@@ -487,3 +559,5 @@ class GitTree(GitObject):
     
     def init(self):
         self.items = list()
+
+
